@@ -1,55 +1,46 @@
-"""
-Database Helper Functions
-
-MongoDB helper functions ready to use in your backend code.
-Import and use these functions in your API endpoints for database operations.
-"""
-
-from pymongo import MongoClient
-from datetime import datetime, timezone
+from typing import Any, Dict, Optional, List
+from datetime import datetime
 import os
-from dotenv import load_dotenv
-from typing import Union
 from pydantic import BaseModel
+from motor.motor_asyncio import AsyncIOMotorClient, AsyncIOMotorDatabase
 
-# Load environment variables from .env file
-load_dotenv()
+MONGO_URL = os.getenv("DATABASE_URL", "mongodb://localhost:27017")
+DB_NAME = os.getenv("DATABASE_NAME", "appdb")
 
-_client = None
-db = None
+_client: Optional[AsyncIOMotorClient] = None
+_db: Optional[AsyncIOMotorDatabase] = None
 
-database_url = os.getenv("DATABASE_URL")
-database_name = os.getenv("DATABASE_NAME")
+async def get_db() -> AsyncIOMotorDatabase:
+    global _client, _db
+    if _db is None:
+        _client = AsyncIOMotorClient(MONGO_URL)
+        _db = _client[DB_NAME]
+    return _db
 
-if database_url and database_name:
-    _client = MongoClient(database_url)
-    db = _client[database_name]
+async def create_document(collection: str, data: Dict[str, Any]) -> Dict[str, Any]:
+    db = await get_db()
+    now = datetime.utcnow()
+    data_to_insert = {**data, "created_at": now, "updated_at": now}
+    res = await db[collection].insert_one(data_to_insert)
+    doc = await db[collection].find_one({"_id": res.inserted_id})
+    # convert ObjectId and datetimes to strings
+    if doc:
+        doc["_id"] = str(doc["_id"])  # type: ignore
+        if isinstance(doc.get("created_at"), datetime):
+            doc["created_at"] = doc["created_at"].isoformat()
+        if isinstance(doc.get("updated_at"), datetime):
+            doc["updated_at"] = doc["updated_at"].isoformat()
+    return doc or {}
 
-# Helper functions for common database operations
-def create_document(collection_name: str, data: Union[BaseModel, dict]):
-    """Insert a single document with timestamp"""
-    if db is None:
-        raise Exception("Database not available. Check DATABASE_URL and DATABASE_NAME environment variables.")
-
-    # Convert Pydantic model to dict if needed
-    if isinstance(data, BaseModel):
-        data_dict = data.model_dump()
-    else:
-        data_dict = data.copy()
-
-    data_dict['created_at'] = datetime.now(timezone.utc)
-    data_dict['updated_at'] = datetime.now(timezone.utc)
-
-    result = db[collection_name].insert_one(data_dict)
-    return str(result.inserted_id)
-
-def get_documents(collection_name: str, filter_dict: dict = None, limit: int = None):
-    """Get documents from collection"""
-    if db is None:
-        raise Exception("Database not available. Check DATABASE_URL and DATABASE_NAME environment variables.")
-    
-    cursor = db[collection_name].find(filter_dict or {})
-    if limit:
-        cursor = cursor.limit(limit)
-    
-    return list(cursor)
+async def get_documents(collection: str, filter_dict: Dict[str, Any] | None = None, limit: int = 50) -> List[Dict[str, Any]]:
+    db = await get_db()
+    cursor = db[collection].find(filter_dict or {}).limit(limit)
+    docs: List[Dict[str, Any]] = []
+    async for d in cursor:
+        d["_id"] = str(d["_id"])  # type: ignore
+        if isinstance(d.get("created_at"), datetime):
+            d["created_at"] = d["created_at"].isoformat()
+        if isinstance(d.get("updated_at"), datetime):
+            d["updated_at"] = d["updated_at"].isoformat()
+        docs.append(d)
+    return docs
